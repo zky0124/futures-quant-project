@@ -1,0 +1,29 @@
+{
+  "initial_cash": 1000000,
+  "commission_rate": 0.00012,
+  "slippage_ticks": 1,
+  "tick_size": 1.0,
+  "contract_multiplier": 10,
+  "margin_rate": 0.12,
+  "max_margin_usage": 0.5,
+  "max_symbol_exposure": 0.12,
+  "daily_loss_stop": 0.02,
+  "strategy": {
+    "name": "dual_ma",
+    "fast_window": 5,
+    "slow_window": 20,
+    "order_size": 1
+  },
+  "data": {
+    "symbol": "RB2405",
+    "path": "data/sample/RB2405_1d.csv",
+    "source_interval_minutes": 1440,
+    "bar_interval_minutes": 1440
+  },
+  "contracts": {
+    "path": "configs/contracts.csv"
+  },
+  "report": {
+    "path": "reports/backtest_summary.csv"
+  }
+}

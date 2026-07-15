@@ -1,0 +1,4 @@
+# Keep source and documentation portable across Windows/macOS/Linux clones.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf

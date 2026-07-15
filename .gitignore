@@ -1,0 +1,33 @@
+# Local credentials and broker-specific runtime configuration
+.env
+.env.*
+!.env.example
+configs/*.local.json
+configs/*secret*.json
+*.pem
+*.key
+
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local broker SDK binaries and logs
+vendor/ctp/
+logs/
+
+# Generated or licensed market data.  Keep only the tiny public sample needed
+# for the default smoke/backtest workflow.
+data/*
+!data/sample/
+!data/sample/**
+*.his
+
+# Generated reports, local exports, and prior delivery bundles
+reports/
+交付文件/
+*.zip
+
+# Machine-specific HTTP smoke configuration
+configs/http_history.file_smoke.json
+MIGRATION_INFO.md

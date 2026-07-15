@@ -1,0 +1,17 @@
+{
+  "start": "2025-01-02",
+  "end": "2026-03-20",
+  "instruments": [
+    {"symbol": "RB2405", "name": "螺纹钢", "group": "国内期货", "base_price": 3500, "drift": 0.0001, "volatility": 0.012, "seed": 11},
+    {"symbol": "I2405", "name": "铁矿石", "group": "国内期货", "base_price": 850, "drift": 0.0000, "volatility": 0.018, "seed": 12},
+    {"symbol": "CU2405", "name": "沪铜", "group": "国内期货", "base_price": 69000, "drift": 0.0002, "volatility": 0.010, "seed": 13},
+    {"symbol": "AU2406", "name": "沪金", "group": "国内期货", "base_price": 480, "drift": 0.00015, "volatility": 0.009, "seed": 14},
+    {"symbol": "M2405", "name": "豆粕", "group": "国内期货", "base_price": 3300, "drift": -0.00005, "volatility": 0.011, "seed": 15},
+    {"symbol": "TA405", "name": "PTA", "group": "国内期货", "base_price": 5900, "drift": 0.00005, "volatility": 0.014, "seed": 16},
+    {"symbol": "IF2406", "name": "沪深300股指", "group": "国内期货", "base_price": 3600, "drift": 0.00008, "volatility": 0.013, "seed": 17},
+    {"symbol": "BTCUSDT", "name": "比特币", "group": "加密货币", "base_price": 65000, "drift": 0.00035, "volatility": 0.035, "seed": 31},
+    {"symbol": "CL", "name": "WTI原油", "group": "国际期货", "base_price": 78, "drift": 0.00005, "volatility": 0.022, "seed": 41},
+    {"symbol": "GC", "name": "COMEX黄金", "group": "国际期货", "base_price": 2300, "drift": 0.00012, "volatility": 0.010, "seed": 42},
+    {"symbol": "ES", "name": "标普500 E-mini", "group": "国际期货", "base_price": 5200, "drift": 0.00018, "volatility": 0.012, "seed": 43}
+  ]
+}

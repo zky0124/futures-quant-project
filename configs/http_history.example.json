@@ -1,0 +1,19 @@
+{
+  "url_template": "https://api.example.com/v1/history?symbol={symbol}&start={start}&end={end}",
+  "format": "json",
+  "encoding": "utf-8",
+  "timeout": 20,
+  "headers": {
+    "Authorization": "Bearer REPLACE_WITH_TOKEN"
+  },
+  "data_path": ["data", "bars"],
+  "field_mapping": {
+    "datetime": "trade_time",
+    "open": "open_price",
+    "high": "high_price",
+    "low": "low_price",
+    "close": "close_price",
+    "volume": "volume",
+    "open_interest": "open_interest"
+  }
+}

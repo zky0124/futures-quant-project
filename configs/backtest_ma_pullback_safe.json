@@ -1,0 +1,36 @@
+{
+  "initial_cash": 5000000,
+  "commission_rate": 0.00012,
+  "slippage_ticks": 1,
+  "tick_size": 1.0,
+  "contract_multiplier": 10,
+  "margin_rate": 0.12,
+  "max_margin_usage": 0.60,
+  "max_symbol_exposure": 2.0,
+  "max_symbol_margin_usage": 0.20,
+  "max_open_positions": 5,
+  "max_trade_risk": 0.005,
+  "max_group_positions": 2,
+  "daily_loss_stop": 0.02,
+  "strategy": {
+    "name": "dual_ma_pullback",
+    "fast_window": 13,
+    "slow_window": 169,
+    "order_size": 0,
+    "atr_window": 14,
+    "ma_exit_buffer_atr": 0.1,
+    "partial_exit_fraction": 0.30,
+    "position_equity_fraction": 0.20,
+    "max_order_size": 5,
+    "max_notional_fraction": 2.0,
+    "allow_short": true
+  },
+  "data": {
+    "symbol": "RB0",
+    "path": "data/pobo_real_15m/RB0_15m.csv",
+    "source_interval_minutes": 15,
+    "bar_interval_minutes": 15
+  },
+  "contracts": {"path": "configs/contracts.csv"},
+  "report": {"path": "reports/ma_pullback_safe/RB0_summary.csv"}
+}

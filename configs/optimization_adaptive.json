@@ -1,0 +1,37 @@
+{
+  "strategy": {
+    "name": "adaptive_trend",
+    "parameter_grid": {
+      "entry_window": [15, 20, 30],
+      "exit_window": [5, 10],
+      "trend_window": [40, 60],
+      "momentum_window": [15],
+      "volatility_window": [20],
+      "target_annual_volatility": [0.08, 0.12],
+      "order_size": [1],
+      "max_order_size": [1000],
+      "max_notional_fraction": [0.20, 0.30],
+      "momentum_threshold": [0.0],
+      "allow_short": [true]
+    }
+  },
+  "max_candidates": 100,
+  "split": {
+    "train_fraction": 0.50,
+    "validation_fraction": 0.25,
+    "min_bars_per_phase": 20
+  },
+  "objective": {
+    "metric": "robust_score",
+    "selection_method": "min_train_validation",
+    "return_weight": 1.0,
+    "sharpe_weight": 0.10,
+    "drawdown_penalty": 0.50,
+    "min_trades": 3,
+    "min_trades_per_instrument": 1
+  },
+  "sensitivity": {
+    "commission_multipliers": [0.5, 1.0, 1.5, 2.0],
+    "slippage_ticks": [0, 1, 2]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "strategy": {
+    "name": "dual_period_reversal",
+    "parameter_grid": {
+      "fast_window": [9, 13],
+      "slow_window": [34, 45],
+      "daily_fast_window": [13],
+      "daily_slow_window": [45],
+      "extreme_move_threshold": [0.18, 0.22],
+      "reward_risk": [2.0],
+      "trailing_atr_multiple": [2.5],
+      "order_size": [5]
+    }
+  },
+  "split": {"train_fraction": 0.60, "validation_fraction": 0.20, "min_bars_per_phase": 500},
+  "objective": {
+    "metric": "robust_score",
+    "selection_method": "min_train_validation",
+    "min_trades": 2,
+    "min_trades_per_instrument": 0,
+    "drawdown_penalty": 0.5
+  },
+  "sensitivity": {"commission_multipliers": [1.0, 1.5, 2.0], "slippage_ticks": [1, 2, 3]}
+}

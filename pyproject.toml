@@ -1,0 +1,16 @@
+[project]
+name = "futures-quant"
+version = "0.1.0"
+description = "Domestic futures quant research and backtesting scaffold with pluggable trading API gateway."
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+fq = "futures_quant.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

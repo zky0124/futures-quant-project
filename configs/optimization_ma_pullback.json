@@ -1,0 +1,24 @@
+{
+  "strategy": {
+    "name": "dual_ma_pullback",
+    "parameter_grid": {
+      "fast_window": [13],
+      "slow_window": [120, 169],
+      "atr_window": [14],
+      "ma_exit_buffer_atr": [0.05, 0.10, 0.20],
+      "partial_exit_fraction": [0.20, 0.30, 0.40],
+      "position_equity_fraction": [0.20, 0.60],
+      "order_size": [0],
+      "max_order_size": [0]
+    }
+  },
+  "split": {"train_fraction": 0.60, "validation_fraction": 0.20, "min_bars_per_phase": 1000},
+  "objective": {
+    "metric": "robust_score",
+    "selection_method": "min_train_validation",
+    "min_trades": 5,
+    "min_trades_per_instrument": 1,
+    "drawdown_penalty": 0.75
+  },
+  "sensitivity": {"commission_multipliers": [1.0, 1.5, 2.0], "slippage_ticks": [1, 2, 3]}
+}

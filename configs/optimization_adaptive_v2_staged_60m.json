@@ -1,0 +1,74 @@
+{
+  "strategy": {
+    "name": "adaptive_trend_v2",
+    "fixed_parameters": {
+      "order_size": 1,
+      "max_order_size": 5,
+      "max_notional_fraction": 0.10,
+      "momentum_threshold": 0.0,
+      "allow_short": true,
+      "annualization_factor": 1008,
+      "atr_window": 20,
+      "break_even_trigger_r": 1.0,
+      "reward_risk": 2.0,
+      "partial_exit_fraction": 0.40,
+      "cooldown_bars": 8,
+      "loss_pause_after": 3,
+      "loss_pause_bars": 32,
+      "volatility_window": 30,
+      "target_annual_volatility": 0.12,
+      "atr_stop_multiple": 2.5,
+      "trailing_atr_multiple": 3.0
+    },
+    "stages": [
+      {
+        "name": "structure",
+        "parameter_grid": {
+          "entry_window": [40, 55, 80],
+          "exit_window": [15, 20],
+          "trend_window": [100, 169],
+          "momentum_window": [40, 60]
+        }
+      },
+      {
+        "name": "risk",
+        "parameter_grid": {
+          "volatility_window": [20, 30],
+          "target_annual_volatility": [0.08, 0.12, 0.15],
+          "atr_stop_multiple": [2.0, 2.5, 3.0],
+          "trailing_atr_multiple": [2.5, 3.5]
+        }
+      }
+    ]
+  },
+  "max_candidates": 100,
+  "split": {
+    "train_fraction": 0.60,
+    "validation_fraction": 0.20,
+    "min_bars_per_phase": 250
+  },
+  "objective": {
+    "metric": "enhanced_robust_score",
+    "selection_method": "min_train_validation",
+    "min_trades": 10,
+    "min_trades_per_instrument": 3,
+    "min_median_instrument_return": 0.0,
+    "min_positive_instrument_ratio": 0.60,
+    "max_rejection_rate": 0.10
+  },
+  "sensitivity": {
+    "commission_multipliers": [1.5, 2.0],
+    "slippage_ticks": [2, 3]
+  },
+  "comparisons": [
+    {
+      "name": "dual_ma",
+      "parameters": {
+        "fast_window": 13,
+        "slow_window": 169,
+        "order_size": 1
+      }
+    }
+  ],
+  "research_data_label": "synthetic_engineering"
+}

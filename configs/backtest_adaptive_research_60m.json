@@ -1,0 +1,38 @@
+{
+  "initial_cash": 5000000,
+  "commission_rate": 0.00012,
+  "slippage_ticks": 1,
+  "tick_size": 1.0,
+  "contract_multiplier": 10,
+  "margin_rate": 0.12,
+  "max_margin_usage": 0.60,
+  "max_symbol_exposure": 2.0,
+  "max_symbol_margin_usage": 0.20,
+  "max_open_positions": 5,
+  "max_trade_risk": 0.005,
+  "max_group_positions": 2,
+  "daily_loss_stop": 0.02,
+  "strategy": {
+    "name": "adaptive_trend",
+    "entry_window": 55,
+    "exit_window": 20,
+    "trend_window": 120,
+    "momentum_window": 60,
+    "volatility_window": 30,
+    "target_annual_volatility": 0.12,
+    "order_size": 1,
+    "max_order_size": 5,
+    "max_notional_fraction": 0.10,
+    "momentum_threshold": 0.0,
+    "allow_short": true,
+    "annualization_factor": 1008
+  },
+  "data": {
+    "symbol": "RB0",
+    "path": "data/domestic_15m/RB0_15m.csv",
+    "source_interval_minutes": 15,
+    "bar_interval_minutes": 60
+  },
+  "contracts": {"path": "configs/contracts.csv"},
+  "report": {"path": "reports/adaptive_research_60m/RB0_summary.csv"}
+}

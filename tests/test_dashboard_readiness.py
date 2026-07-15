@@ -11,12 +11,26 @@ from futures_quant.dashboard import (
     DEFAULT_STRATEGY_LABEL,
     STRATEGY_LABELS,
     assess_api_readiness,
+    available_instruments_for_data,
     classify_data_source,
     scan_data_directory,
 )
+from futures_quant.data.history import Instrument
 
 
 class DashboardDataReadinessTest(unittest.TestCase):
+    @staticmethod
+    def _instrument(symbol: str) -> Instrument:
+        return Instrument(
+            symbol=symbol,
+            name=symbol,
+            group="测试板块",
+            base_price=100.0,
+            drift=0.0,
+            volatility=0.01,
+            seed=1,
+        )
+
     def test_default_strategy_is_established_adaptive_baseline(self) -> None:
         self.assertEqual(DEFAULT_STRATEGY_LABEL, "自适应趋势")
         self.assertEqual(STRATEGY_LABELS[DEFAULT_STRATEGY_LABEL], "adaptive_trend")
@@ -72,6 +86,29 @@ class DashboardDataReadinessTest(unittest.TestCase):
             self.assertEqual(coverage.loc["RB0", "three_year_check"], "约3年或以上")
             self.assertEqual(coverage.loc["AU0", "three_year_check"], "不足3年")
             self.assertEqual(coverage.loc["RB0", "status"], "ok")
+
+    def test_available_instruments_only_uses_matching_regular_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            instruments = [
+                self._instrument("RB0"),
+                self._instrument("HC0"),
+                self._instrument("AU0"),
+                self._instrument("C0"),
+            ]
+            (root / "RB0_15m.csv").touch()
+            (root / "AU0_15m.csv").touch()
+            (root / "HC0_60m.csv").touch()
+            (root / "C0_15m.csv").mkdir()
+
+            available = available_instruments_for_data(
+                instruments, root, "_15m.csv"
+            )
+
+            self.assertEqual([item.symbol for item in available], ["RB0", "AU0"])
+            self.assertEqual(
+                available_instruments_for_data(instruments, root, ""), []
+            )
 
 
 class DashboardApiReadinessTest(unittest.TestCase):

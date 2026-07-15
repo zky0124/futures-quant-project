@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 import importlib.util
 import json
 import math
@@ -22,7 +23,7 @@ from futures_quant.cli import build_strategy, strategy_parameters
 from futures_quant.config import StrategyConfig
 from futures_quant.data.contracts import load_contract_specs
 from futures_quant.data.csv_loader import load_bars
-from futures_quant.data.history import load_universe
+from futures_quant.data.history import Instrument, load_universe
 from futures_quant.data.pobo import import_pobo_his
 from futures_quant.data.timeframe import aggregate_bars, validate_intervals
 from futures_quant.optimization.walk_forward import optimize_strategy
@@ -222,6 +223,27 @@ def scan_data_directory(path: str | Path, suffix: str) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows)
+
+
+def available_instruments_for_data(
+    instruments: Iterable[Instrument], data_dir: str | Path, suffix: str
+) -> list[Instrument]:
+    """Return only universe instruments with a matching local bar file.
+
+    The workbench deliberately keeps the full universe visible so a user can
+    see what is missing, but one-click actions must never submit those missing
+    symbols to a backtest or scan.
+    """
+
+    directory = Path(data_dir)
+    normalized_suffix = suffix.strip()
+    if not normalized_suffix or not directory.is_dir():
+        return []
+    return [
+        instrument
+        for instrument in instruments
+        if (directory / f"{instrument.symbol}{normalized_suffix}").is_file()
+    ]
 
 
 def _has_ctp_sdk(adapter_spec: str = "") -> bool:
@@ -425,7 +447,8 @@ class QuantWorkbench:
         self.result = None
         self.scan_results = pd.DataFrame()
         self.scan_cancel_event = threading.Event()
-        self.universe_instruments = []
+        self.universe_instruments: list[Instrument] = []
+        self.visible_instruments: list[Instrument] = []
         self._build_style()
         self._build_ui()
         self._load_universe()
@@ -532,13 +555,33 @@ class QuantWorkbench:
             justify=LEFT,
         )
         self.data_source_badge_label.pack(fill="x", anchor="w", pady=(7, 2))
+        self.real_short_sample_button = ttk.Button(
+            left,
+            text="使用本机真实短样本（约8个月）",
+            command=self._use_real_short_sample_data,
+        )
+        self.real_short_sample_button.pack(fill="x", pady=(2, 2))
+        self.available_data_status = StringVar(
+            value="当前目录可回测品种：正在读取品种池…"
+        )
+        ttk.Label(
+            left,
+            textvariable=self.available_data_status,
+            wraplength=280,
+            justify=LEFT,
+        ).pack(fill="x", anchor="w", pady=(0, 2))
         self.quick_data_scan_button = ttk.Button(
             left,
             text="扫描数据覆盖范围",
             command=self._start_data_scan,
         )
         self.quick_data_scan_button.pack(fill="x", pady=(2, 4))
-        ttk.Label(left, text="可多选；实盘连续合约需映射到当前可交易合约").pack(anchor="w", pady=(7, 3))
+        ttk.Label(
+            left,
+            text="可多选；“有数据”才可回测，实盘连续合约需映射到当前可交易合约",
+            wraplength=280,
+            justify=LEFT,
+        ).pack(anchor="w", pady=(7, 3))
         filter_row = ttk.Frame(left)
         filter_row.pack(fill="x", pady=(0, 4))
         self.symbol_search_var = StringVar()
@@ -561,15 +604,26 @@ class QuantWorkbench:
         self.symbol_list.pack(fill=BOTH, expand=True)
         list_actions = ttk.Frame(left)
         list_actions.pack(fill="x", pady=(7, 0))
+        ttk.Button(
+            list_actions,
+            text="全选有数据",
+            command=self._select_available_symbols,
+        ).pack(side=LEFT, fill="x", expand=True)
         ttk.Button(list_actions, text="全选当前", command=lambda: self.symbol_list.selection_set(0, END)).pack(side=LEFT, fill="x", expand=True)
-        ttk.Button(list_actions, text="清除", command=lambda: self.symbol_list.selection_clear(0, END)).pack(side=LEFT, fill="x", expand=True, padx=4)
-        ttk.Button(list_actions, text="刷新品种", command=self._load_universe).pack(side=LEFT, fill="x", expand=True)
+        ttk.Button(list_actions, text="清除", command=lambda: self.symbol_list.selection_clear(0, END)).pack(side=LEFT, fill="x", expand=True, padx=3)
+        ttk.Button(list_actions, text="刷新", command=self._load_universe).pack(side=LEFT, fill="x", expand=True)
         self.scan_button = ttk.Button(
             left,
-            text="一键扫描全部品种收益",
+            text="一键扫描当前可用品种收益",
             command=self._start_scan_all,
         )
         self.scan_button.pack(fill="x", pady=(7, 0))
+        self.data_dir_var.trace_add(
+            "write", lambda *_args: self._refresh_available_data_controls()
+        )
+        self.suffix_var.trace_add(
+            "write", lambda *_args: self._refresh_available_data_controls()
+        )
 
         self.strategy_var = StringVar(value=DEFAULT_STRATEGY_LABEL)
         strategy_row = ttk.Frame(right)
@@ -1099,6 +1153,43 @@ class QuantWorkbench:
             self.data_dir_var.set(self._display_path(Path(path)))
             self._update_data_source_badge()
             self._filter_universe(select_defaults=True)
+            self._refresh_available_data_controls()
+
+    def _use_real_short_sample_data(self) -> None:
+        """Select the imported Pobo cache without asking for credentials."""
+
+        data_dir = self.project_root / "data" / "pobo_real_15m"
+        if not data_dir.is_dir() or not any(data_dir.glob("*_15m.csv")):
+            messagebox.showerror(
+                "未找到真实短样本",
+                "本机 data/pobo_real_15m 中没有 *_15m.csv 文件。\n\n"
+                "请先在“真实数据与API就绪”页导入博易历史，或选择已有真实行情目录。",
+            )
+            return
+        available = available_instruments_for_data(
+            self.universe_instruments, data_dir, "_15m.csv"
+        )
+        if not available:
+            messagebox.showerror(
+                "没有可映射的真实短样本",
+                "目录中虽然存在 CSV，但没有文件与当前品种池匹配。\n\n"
+                "请检查品种代码映射和文件命名，例如 RB0_15m.csv。",
+            )
+            return
+        self.data_dir_var.set(self._display_path(data_dir))
+        self.suffix_var.set("_15m.csv")
+        self.source_interval_var.set("15分钟")
+        self._set_runtime_interval(15)
+        self.group_filter_var.set("全部板块")
+        self.symbol_search_var.set("")
+        self._update_data_source_badge()
+        self._filter_universe(select_defaults=True)
+        available_count = len(available)
+        self._refresh_available_data_controls()
+        self.status.set(
+            f"已切换到本机真实短样本：{available_count} 个可回测品种，"
+            "默认选中前5个；仅约8个月，用于短样本工程测试。"
+        )
 
     def _choose_pobo_his(self) -> None:
         path = filedialog.askopenfilename(
@@ -1362,19 +1453,39 @@ class QuantWorkbench:
             self.status.set(f"品种池读取失败：{exc}")
             return
         self.universe_instruments = universe.instruments
-        self.scan_button.configure(
-            text=f"一键扫描全部 {len(universe.instruments)} 个品种收益"
-        )
         groups = ["全部板块", *sorted({item.group for item in universe.instruments})]
         self.group_filter.configure(values=groups)
         if self.group_filter_var.get() not in groups:
             self.group_filter_var.set("全部板块")
         self._filter_universe(select_defaults=True)
+        self._refresh_available_data_controls()
         selected_count = len(self.symbol_list.curselection())
         self.status.set(
             f"已载入 {len(universe.instruments)} 个品种；"
             f"默认选中 {selected_count} 个已有行情品种"
         )
+
+    def _current_available_instruments(self) -> list[Instrument]:
+        return available_instruments_for_data(
+            self.universe_instruments,
+            self._resolve(self.data_dir_var.get()),
+            self.suffix_var.get(),
+        )
+
+    def _refresh_available_data_controls(self) -> None:
+        available_count = len(self._current_available_instruments())
+        total_count = len(self.universe_instruments)
+        if total_count:
+            self.available_data_status.set(
+                f"当前目录可回测：{available_count}/{total_count} 个品种；"
+                "一键扫描会自动跳过缺失行情。"
+            )
+            self.scan_button.configure(
+                text=f"一键扫描当前可用 {available_count} 个品种收益"
+            )
+        else:
+            self.available_data_status.set("当前目录可回测：品种池尚未载入")
+            self.scan_button.configure(text="一键扫描当前可用品种收益")
 
     def _filter_universe(self, select_defaults: bool = False) -> None:
         query = self.symbol_search_var.get().strip().lower()
@@ -1385,24 +1496,37 @@ class QuantWorkbench:
             if (group == "全部板块" or item.group == group)
             and (not query or query in item.symbol.lower() or query in item.name.lower())
         ]
+        self.visible_instruments = visible
+        available_symbols = {
+            item.symbol for item in self._current_available_instruments()
+        }
         self.symbol_list.delete(0, END)
         for instrument in visible:
+            availability = "有数据" if instrument.symbol in available_symbols else "缺数据"
             self.symbol_list.insert(
-                END, f"{instrument.symbol}  {instrument.name}  [{instrument.group}]"
+                END,
+                f"{instrument.symbol}  {instrument.name}  [{instrument.group}]  {availability}",
             )
         if select_defaults:
-            data_dir = self._resolve(self.data_dir_var.get())
-            suffix = self.suffix_var.get().strip()
             available_indices = [
                 index
                 for index, instrument in enumerate(visible)
-                if suffix and (data_dir / f"{instrument.symbol}{suffix}").exists()
+                if instrument.symbol in available_symbols
             ]
-            default_indices = available_indices[:5] or list(
-                range(min(5, len(visible)))
-            )
-            for index in default_indices:
+            for index in available_indices[:5]:
                 self.symbol_list.selection_set(index)
+
+    def _select_available_symbols(self) -> None:
+        available_symbols = {
+            item.symbol for item in self._current_available_instruments()
+        }
+        self.symbol_list.selection_clear(0, END)
+        selected = 0
+        for index, instrument in enumerate(self.visible_instruments):
+            if instrument.symbol in available_symbols:
+                self.symbol_list.selection_set(index)
+                selected += 1
+        self.status.set(f"已选中当前筛选范围内 {selected} 个有本机行情的品种")
 
     def _selected_symbols(self) -> list[str]:
         return [self.symbol_list.get(index).split()[0] for index in self.symbol_list.curselection()]
@@ -1804,8 +1928,8 @@ class QuantWorkbench:
             self.root.after(0, lambda: self._job_error("回测失败", exc))
 
     def _start_scan_all(self) -> None:
-        instruments = list(self.universe_instruments)
-        if not instruments:
+        universe_instruments = list(self.universe_instruments)
+        if not universe_instruments:
             messagebox.showwarning("品种池为空", "当前品种池没有可扫描品种。")
             return
         data_dir = self._resolve(self.data_dir_var.get())
@@ -1823,9 +1947,23 @@ class QuantWorkbench:
                 raise ValueError("MA169穿越/MA13分批策略固定使用15分钟K线。")
             if strategy.fast_window >= strategy.slow_window:
                 raise ValueError("短均线周期必须小于长均线周期。")
+            instruments = available_instruments_for_data(
+                universe_instruments, data_dir, suffix
+            )
+            if not instruments:
+                raise FileNotFoundError(
+                    "当前数据目录中没有与品种池匹配的本地行情文件。\n"
+                    "请点击“使用本机真实短样本（约8个月）”，或检查数据目录和文件后缀。"
+                )
         except Exception as exc:
             messagebox.showerror("全品种扫描启动失败", str(exc))
             return
+        available_symbols = {instrument.symbol for instrument in instruments}
+        skipped_symbols = [
+            instrument.symbol
+            for instrument in universe_instruments
+            if instrument.symbol not in available_symbols
+        ]
         classification = classify_data_source(data_dir)
         research_warnings: list[str] = []
         if classification.kind != "real":
@@ -1846,11 +1984,18 @@ class QuantWorkbench:
         self.scan_button.configure(state="disabled")
         self.scan_cancel_button.configure(state="normal")
         self.scan_progress.configure(value=0, maximum=len(instruments))
+        skipped_note = (
+            f" · 已跳过 {len(skipped_symbols)} 个缺失行情品种"
+            if skipped_symbols
+            else ""
+        )
         self.scan_status.set(
             f"准备扫描 {len(instruments)} 个品种 · {target_minutes}分钟 · "
-            f"{classification.label}"
+            f"{classification.label}{skipped_note}"
         )
-        self.status.set("正在运行全品种独立收益扫描…")
+        self.status.set(
+            f"正在运行 {len(instruments)} 个可用行情品种的独立收益扫描…{skipped_note}"
+        )
         self.tabs.select(self.scan_tab)
         threading.Thread(
             target=self._scan_all_job,
@@ -1862,6 +2007,7 @@ class QuantWorkbench:
                 run_values,
                 data_dir,
                 suffix,
+                skipped_symbols,
             ),
             daemon=True,
         ).start()
@@ -1875,6 +2021,7 @@ class QuantWorkbench:
         run_values: dict[str, str],
         data_dir: Path,
         suffix: str,
+        skipped_symbols: list[str],
     ) -> None:
         try:
             specs = load_contract_specs(self.project_root / "configs/contracts.csv")
@@ -1929,7 +2076,9 @@ class QuantWorkbench:
                 },
                 "source_interval_minutes": source_minutes,
                 "bar_interval_minutes": target_minutes,
-                "instrument_count": len(instruments),
+                "universe_instrument_count": len(instruments) + len(skipped_symbols),
+                "available_instrument_count": len(instruments),
+                "skipped_missing_data_symbols": skipped_symbols,
                 "strategy": strategy.__dict__,
                 "risk": run_values,
             }
@@ -1945,6 +2094,7 @@ class QuantWorkbench:
                     output,
                     was_cancelled,
                     classify_data_source(data_dir).label,
+                    len(skipped_symbols),
                 ),
             )
         except Exception as exc:
@@ -1965,6 +2115,7 @@ class QuantWorkbench:
         output: Path,
         was_cancelled: bool,
         data_label: str,
+        skipped_missing_count: int = 0,
     ) -> None:
         self.scan_results = ranking
         display = ranking.copy()
@@ -2000,8 +2151,14 @@ class QuantWorkbench:
         successful = int(ranking["status"].eq("ok").sum()) if not ranking.empty else 0
         failed = len(ranking) - successful
         prefix = "扫描已停止" if was_cancelled else "扫描完成"
+        skipped_note = (
+            f" · 已跳过缺失行情 {skipped_missing_count}"
+            if skipped_missing_count
+            else ""
+        )
         self.scan_status.set(
-            f"{prefix} · {data_label} · 成功 {successful} · 失败 {failed} · 结果：{output}"
+            f"{prefix} · {data_label} · 成功 {successful} · 失败 {failed}"
+            f"{skipped_note} · 结果：{output}"
         )
         self.scan_progress.configure(value=len(ranking))
         self.scan_button.configure(state="normal")
@@ -2167,7 +2324,27 @@ class QuantWorkbench:
         if not symbols:
             messagebox.showwarning("未选择品种", "请先在回测页选择优化品种。")
             return
+        data_dir = self._resolve(self.data_dir_var.get())
+        suffix = self.suffix_var.get().strip()
         try:
+            if not data_dir.exists() or not data_dir.is_dir():
+                raise FileNotFoundError(f"数据目录不存在：{data_dir}")
+            if not suffix:
+                raise ValueError("文件后缀不能为空，例如 _15m.csv。")
+            missing_files = [
+                str(data_dir / f"{symbol}{suffix}")
+                for symbol in symbols
+                if not (data_dir / f"{symbol}{suffix}").is_file()
+            ]
+            if missing_files:
+                preview = "\n".join(missing_files[:8])
+                remainder = len(missing_files) - 8
+                if remainder > 0:
+                    preview += f"\n…另有 {remainder} 个文件缺失"
+                raise FileNotFoundError(
+                    f"所选优化品种缺少行情文件：\n{preview}\n"
+                    "请点击“全选有数据”，或调整数据目录和文件后缀。"
+                )
             grid = json.loads(self.grid_text.get("1.0", END))
             if not isinstance(grid, dict) or not grid:
                 raise ValueError("参数网格必须是非空 JSON 对象")
@@ -2196,8 +2373,8 @@ class QuantWorkbench:
                 source_minutes,
                 target_minutes,
                 self._resolve(self.universe_var.get()),
-                self._resolve(self.data_dir_var.get()),
-                self.suffix_var.get().strip(),
+                data_dir,
+                suffix,
             ),
             daemon=True,
         ).start()

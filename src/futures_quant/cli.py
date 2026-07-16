@@ -4,7 +4,7 @@ import argparse
 import csv
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -477,6 +477,74 @@ def ctp_diagnose(config_path: Path) -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def okx_diagnose(config_path: Path, *, connect_read_only: bool) -> None:
+    """Inspect OKX readiness without ever placing or cancelling an order."""
+
+    from futures_quant.api.okx_config import load_okx_config
+    from futures_quant.api.okx_rest import OkxPrivateClient
+
+    config = load_okx_config(
+        config_path, environ=None if connect_read_only else {}
+    )
+    report: dict[str, object] = {
+        "config_path": str(config_path),
+        "config": config.redacted_summary(),
+        "credential_environment_read": connect_read_only,
+        "network_action": connect_read_only,
+        "order_action": False,
+    }
+    if connect_read_only:
+        client = OkxPrivateClient(config)
+        server_time_ms = client.get_server_time_ms()
+        local_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        identity = client.verify_subaccount_identity()
+        report.update(
+            {
+                "server_clock_drift_ms": local_time_ms - server_time_ms,
+                "identity": identity.redacted_summary(),
+                "balance_record_count": len(client.get_balances()),
+                "position_record_count": len(
+                    client.get_positions(inst_type="SWAP")
+                ),
+                "pending_order_count": len(
+                    client.get_pending_orders(inst_type="SWAP")
+                ),
+            }
+        )
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def okx_download_history(
+    inst_id: str,
+    bar: str,
+    start_text: str,
+    output_path: Path,
+    max_pages: int,
+) -> None:
+    """Download public OKX candles only; API credentials are not used."""
+
+    from futures_quant.api.okx_rest import OkxPublicClient
+    from futures_quant.data.okx import download_okx_history
+
+    start = datetime.fromisoformat(start_text)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    result = download_okx_history(
+        OkxPublicClient(),
+        inst_id=inst_id,
+        bar=bar,
+        output_path=output_path,
+        start=start,
+        max_pages=max_pages,
+    )
+    print("OKX public history download complete")
+    print(f"instrument: {result.inst_id}")
+    print(f"bar: {result.bar}")
+    print(f"bars: {result.bar_count}")
+    print(f"range: {result.first_datetime} -> {result.last_datetime} UTC")
+    print(f"output: {result.output_path}")
+
+
 def record_sample_bars(output: Path) -> None:
     gateway = MockGateway()
     gateway.connect()
@@ -905,6 +973,36 @@ def main() -> None:
         default="configs/api.changjiang.example.json",
         help="CTP JSON configuration template path",
     )
+    okx_diag = sub.add_parser(
+        "okx-diagnose",
+        help="Inspect OKX config offline, or explicitly run read-only subaccount checks",
+    )
+    okx_diag.add_argument(
+        "--config",
+        default="configs/api.okx.example.json",
+        help="OKX JSON configuration path",
+    )
+    okx_diag.add_argument(
+        "--connect-read-only",
+        action="store_true",
+        help="Read credential environment variables and query time/config/balance/positions; never orders",
+    )
+    okx_history = sub.add_parser(
+        "okx-download-history",
+        help="Download confirmed public OKX candles to the standard CSV format",
+    )
+    okx_history.add_argument("--inst-id", default="BTC-USDT-SWAP")
+    okx_history.add_argument("--bar", default="15m")
+    okx_history.add_argument(
+        "--start",
+        default=(datetime.now(timezone.utc) - timedelta(days=245)).date().isoformat(),
+        help="UTC start date/time, ISO-8601",
+    )
+    okx_history.add_argument(
+        "--output",
+        default="data/okx_real_15m/BTC-USDT-SWAP_15m.csv",
+    )
+    okx_history.add_argument("--max-pages", type=int, default=200)
     rec = sub.add_parser("record-sample-bars", help="Write normalized gateway bars to a CSV file")
     rec.add_argument("--output", default="data/recorded/RB2405_gateway_sample.csv", help="Output CSV path")
     replay = sub.add_parser("replay-gateway-csv", help="Replay a CSV through the gateway boundary and record normalized bars")
@@ -1090,6 +1188,19 @@ def main() -> None:
         gateway_smoke()
     elif args.command == "ctp-diagnose":
         ctp_diagnose(project_root / args.config)
+    elif args.command == "okx-diagnose":
+        okx_diagnose(
+            project_root / args.config,
+            connect_read_only=args.connect_read_only,
+        )
+    elif args.command == "okx-download-history":
+        okx_download_history(
+            args.inst_id,
+            args.bar,
+            args.start,
+            project_root / args.output,
+            args.max_pages,
+        )
     elif args.command == "record-sample-bars":
         record_sample_bars(project_root / args.output)
     elif args.command == "replay-gateway-csv":

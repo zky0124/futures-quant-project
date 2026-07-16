@@ -4,12 +4,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
 from futures_quant.dashboard import (
     DEFAULT_STRATEGY_LABEL,
     STRATEGY_LABELS,
+    QuantWorkbench,
+    TaskGate,
     assess_api_readiness,
     available_instruments_for_data,
     classify_data_source,
@@ -32,7 +35,7 @@ class DashboardDataReadinessTest(unittest.TestCase):
         )
 
     def test_default_strategy_is_established_adaptive_baseline(self) -> None:
-        self.assertEqual(DEFAULT_STRATEGY_LABEL, "自适应趋势")
+        self.assertEqual(DEFAULT_STRATEGY_LABEL, "自适应趋势（当前基准）")
         self.assertEqual(STRATEGY_LABELS[DEFAULT_STRATEGY_LABEL], "adaptive_trend")
 
     def test_synthetic_and_unknown_data_are_never_labelled_real(self) -> None:
@@ -109,6 +112,87 @@ class DashboardDataReadinessTest(unittest.TestCase):
             self.assertEqual(
                 available_instruments_for_data(instruments, root, ""), []
             )
+
+
+class _FakeWidget:
+    def __init__(self) -> None:
+        self.state = "normal"
+
+    def configure(self, **values) -> None:
+        if "state" in values:
+            self.state = values["state"]
+
+
+class _FakeVar:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def set(self, value: object) -> None:
+        self.value = str(value)
+
+
+class DashboardTaskLifecycleTest(unittest.TestCase):
+    def test_task_gate_rejects_overlap_and_stale_finish(self) -> None:
+        gate = TaskGate()
+        first = gate.start("backtest", "组合回测")
+        self.assertIsNotNone(first)
+        self.assertIsNone(gate.start("scan", "批量单品种排名"))
+        self.assertTrue(gate.finish(first))  # type: ignore[arg-type]
+        second = gate.start("scan", "批量单品种排名")
+        self.assertIsNotNone(second)
+        self.assertFalse(gate.finish(first))  # type: ignore[arg-type]
+        self.assertEqual(gate.current, second)
+        self.assertGreater(second.token, first.token)  # type: ignore[union-attr]
+
+    def _workbench(self) -> QuantWorkbench:
+        workbench = QuantWorkbench.__new__(QuantWorkbench)
+        workbench.task_gate = TaskGate()
+        workbench.status = _FakeVar()
+        for name in (
+            "run_button",
+            "scan_button",
+            "optimize_button",
+            "data_scan_button",
+            "quick_data_scan_button",
+            "pobo_import_button",
+            "real_short_sample_button",
+            "scan_cancel_button",
+        ):
+            setattr(workbench, name, _FakeWidget())
+        workbench._current_available_instruments = lambda: [object()]  # type: ignore[method-assign]
+        return workbench
+
+    def test_render_failure_always_releases_every_task_button(self) -> None:
+        workbench = self._workbench()
+        task = workbench._begin_background_task("backtest", "组合回测")
+        self.assertIsNotNone(task)
+        self.assertEqual(workbench.run_button.state, "disabled")
+        with patch("futures_quant.dashboard.messagebox.showerror"):
+            workbench._deliver_task_success(
+                task,  # type: ignore[arg-type]
+                "回测结果显示失败",
+                lambda: (_ for _ in ()).throw(RuntimeError("render failed")),
+            )
+        self.assertIsNone(workbench.task_gate.current)
+        for name in (
+            "run_button",
+            "scan_button",
+            "optimize_button",
+            "data_scan_button",
+            "quick_data_scan_button",
+            "pobo_import_button",
+            "real_short_sample_button",
+        ):
+            self.assertEqual(getattr(workbench, name).state, "normal")
+
+    def test_scan_task_only_enables_its_cancel_button(self) -> None:
+        workbench = self._workbench()
+        task = workbench._begin_background_task("scan", "批量单品种排名")
+        self.assertEqual(workbench.scan_button.state, "disabled")
+        self.assertEqual(workbench.scan_cancel_button.state, "normal")
+        workbench._finish_background_task(task)  # type: ignore[arg-type]
+        self.assertEqual(workbench.scan_button.state, "normal")
+        self.assertEqual(workbench.scan_cancel_button.state, "disabled")
 
 
 class DashboardApiReadinessTest(unittest.TestCase):

@@ -1,0 +1,29 @@
+{
+  "gateway": "okx",
+  "enabled": false,
+  "environment": "demo",
+  "base_url": "https://openapi.okx.com",
+  "private_api_enabled": false,
+  "order_submission_enabled": false,
+  "live_trading_enabled": false,
+  "require_subaccount": true,
+  "require_ip_binding_for_orders": true,
+  "api_key_env": "OKX_API_KEY",
+  "secret_key_env": "OKX_SECRET_KEY",
+  "passphrase_env": "OKX_PASSPHRASE",
+  "expected_uid_env": "OKX_EXPECTED_UID",
+  "expected_main_uid_env": "OKX_EXPECTED_MAIN_UID",
+  "timeout_seconds": 10,
+  "order_arm_timeout_seconds": 120,
+  "allowed_trade_modes": [
+    "cash",
+    "cross",
+    "isolated"
+  ],
+  "allowed_order_types": [
+    "limit"
+  ],
+  "allow_opening_orders": false,
+  "order_limits": {},
+  "client_order_tag": "FQWORKBENCH"
+}

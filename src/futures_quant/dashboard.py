@@ -37,17 +37,15 @@ from futures_quant.presentation.chinese import (
 
 
 STRATEGY_LABELS = {
-    "强化自适应（研究候选，待真实三年验证）": "adaptive_trend_v2",
-    "MA169穿越/MA13分批（15分钟默认）": "dual_ma_pullback",
-    "双周期反转": "dual_period_reversal",
-    "双均线基准（原始）": "dual_ma",
-    "自适应趋势": "adaptive_trend",
+    "自适应趋势（当前基准）": "adaptive_trend",
+    "MA169穿越/MA13分批（安全候选）": "dual_ma_pullback",
+    "强化自适应（研究候选）": "adaptive_trend_v2",
 }
 
-DEFAULT_STRATEGY_LABEL = "自适应趋势"
+DEFAULT_STRATEGY_LABEL = "自适应趋势（当前基准）"
 DUAL_MA_STRESS_WARNING = (
-    "⚠ 高风险压力测试：该配置允许单品种使用60%权益保证金预算、单笔风险3%。"
-    "螺纹真实短样本曾回撤约25%，仅用于研究，不是推荐实盘参数。"
+    "研究候选：默认使用单品种20%保证金预算、单笔风险0.5%、最多5手。"
+    "真实短样本与成本压力结果仍不稳健，不是实盘推荐。"
 )
 
 CTP_SDK_MODULE_CANDIDATES = (
@@ -72,6 +70,43 @@ class ApiReadiness:
     status: str
     safe_fields: tuple[tuple[str, str], ...]
     problems: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BackgroundTask:
+    """One workbench job that owns the UI until it finishes."""
+
+    token: int
+    kind: str
+    label: str
+
+
+class TaskGate:
+    """Small UI-independent guard against overlapping background jobs."""
+
+    def __init__(self) -> None:
+        self._next_token = 0
+        self._current: BackgroundTask | None = None
+
+    @property
+    def current(self) -> BackgroundTask | None:
+        return self._current
+
+    def start(self, kind: str, label: str) -> BackgroundTask | None:
+        if self._current is not None:
+            return None
+        self._next_token += 1
+        self._current = BackgroundTask(self._next_token, kind, label)
+        return self._current
+
+    def is_current(self, task: BackgroundTask) -> bool:
+        return self._current == task
+
+    def finish(self, task: BackgroundTask) -> bool:
+        if not self.is_current(task):
+            return False
+        self._current = None
+        return True
 
 
 def classify_data_source(path: str | Path) -> DataSourceClassification:
@@ -230,9 +265,8 @@ def available_instruments_for_data(
 ) -> list[Instrument]:
     """Return only universe instruments with a matching local bar file.
 
-    The workbench deliberately keeps the full universe visible so a user can
-    see what is missing, but one-click actions must never submit those missing
-    symbols to a backtest or scan.
+    The workbench uses this filtered list for both display and one-click tasks,
+    so a visible symbol always has the matching local history file.
     """
 
     directory = Path(data_dir)
@@ -447,6 +481,8 @@ class QuantWorkbench:
         self.result = None
         self.scan_results = pd.DataFrame()
         self.scan_cancel_event = threading.Event()
+        self.task_gate = TaskGate()
+        self._acknowledged_research_warnings: set[tuple[str, ...]] = set()
         self.universe_instruments: list[Instrument] = []
         self.visible_instruments: list[Instrument] = []
         self._build_style()
@@ -475,6 +511,135 @@ class QuantWorkbench:
             foreground="#b42318",
         )
 
+    def _sync_task_controls(self) -> None:
+        """Keep task-launch controls consistent with the one-task rule."""
+
+        task = self.task_gate.current
+        for attribute in (
+            "run_button",
+            "scan_button",
+            "optimize_button",
+            "data_scan_button",
+            "quick_data_scan_button",
+            "pobo_import_button",
+            "real_short_sample_button",
+        ):
+            widget = getattr(self, attribute, None)
+            if widget is not None:
+                state = "disabled" if task is not None else "normal"
+                if (
+                    task is None
+                    and attribute == "scan_button"
+                    and not self._current_available_instruments()
+                ):
+                    state = "disabled"
+                widget.configure(state=state)
+        cancel_button = getattr(self, "scan_cancel_button", None)
+        if cancel_button is not None:
+            cancel_button.configure(
+                state="normal" if task is not None and task.kind == "scan" else "disabled"
+            )
+
+    def _begin_background_task(
+        self, kind: str, label: str
+    ) -> BackgroundTask | None:
+        task = self.task_gate.start(kind, label)
+        if task is None:
+            return None
+        self._sync_task_controls()
+        self.status.set(f"正在进行：{label}。其它测试会在完成后自动恢复。")
+        return task
+
+    def _finish_background_task(self, task: BackgroundTask) -> bool:
+        finished = self.task_gate.finish(task)
+        if finished:
+            self._sync_task_controls()
+        return finished
+
+    def _post_task_success(
+        self,
+        task: BackgroundTask,
+        title: str,
+        callback,
+    ) -> None:
+        self.root.after(
+            0,
+            lambda task=task, title=title, callback=callback: self._deliver_task_success(
+                task, title, callback
+            ),
+        )
+
+    def _deliver_task_success(self, task: BackgroundTask, title: str, callback) -> None:
+        if not self.task_gate.is_current(task):
+            return
+        try:
+            callback()
+        except Exception as exc:
+            self._finish_background_task(task)
+            self._show_task_error(task, title, exc)
+            return
+        self._finish_background_task(task)
+
+    def _post_task_error(
+        self, task: BackgroundTask, title: str, error: Exception
+    ) -> None:
+        self.root.after(
+            0,
+            lambda task=task, title=title, error=error: self._deliver_task_error(
+                task, title, error
+            ),
+        )
+
+    def _launch_background_thread(
+        self, task: BackgroundTask, title: str, target, args: tuple[object, ...]
+    ) -> None:
+        try:
+            threading.Thread(target=target, args=args, daemon=True).start()
+        except Exception as exc:
+            self._deliver_task_error(task, title, exc)
+
+    def _deliver_task_error(
+        self, task: BackgroundTask, title: str, error: Exception
+    ) -> None:
+        if not self.task_gate.is_current(task):
+            return
+        self._finish_background_task(task)
+        self._show_task_error(task, title, error)
+
+    def _show_task_error(
+        self, task: BackgroundTask, title: str, error: Exception
+    ) -> None:
+        if task.kind == "data_scan":
+            self._data_scan_failed(error)
+            return
+        if task.kind == "pobo_import":
+            self._pobo_import_failed(error)
+            return
+        if task.kind == "scan":
+            self._scan_failed(error)
+            return
+        self._job_error(title, error, optimization=task.kind == "optimization")
+
+    def _confirm_research_run(
+        self, action: str, warnings: list[str]
+    ) -> bool:
+        """Show a research warning once per session/configuration."""
+
+        if not warnings:
+            return True
+        fingerprint = (action, *warnings)
+        if fingerprint in self._acknowledged_research_warnings:
+            return True
+        confirmed = messagebox.askyesno(
+            f"确认{action}",
+            "这是研究任务，不会连接 API 或发送真实委托。\n\n"
+            + "\n\n".join(warnings)
+            + "\n\n继续吗？后续同类提示本次打开工作台只显示一次。",
+        )
+        if confirmed:
+            self._acknowledged_research_warnings.add(fingerprint)
+        return confirmed
+
     def _build_ui(self) -> None:
         header = ttk.Frame(self.root, padding=(14, 10))
         header.pack(fill="x")
@@ -502,7 +667,7 @@ class QuantWorkbench:
             (self.trades_tab, "历史成交"),
             (self.pnl_tab, "历史盈亏"),
             (self.curve_tab, "总收益曲线"),
-            (self.scan_tab, "全品种扫描"),
+            (self.scan_tab, "批量单品种排名"),
             (self.comparison_tab, "策略对比"),
             (self.optimization_tab, "参数优化"),
         ]:
@@ -536,11 +701,7 @@ class QuantWorkbench:
 
         self.universe_var = StringVar(value="configs/universe_domestic_3y.json")
         real_data_dir = self.project_root / "data" / "pobo_real_15m"
-        default_data_dir = (
-            real_data_dir
-            if real_data_dir.exists() and any(real_data_dir.glob("*_15m.csv"))
-            else self.project_root / "data" / "domestic_15m"
-        )
+        default_data_dir = real_data_dir
         self.data_dir_var = StringVar(value=self._display_path(default_data_dir))
         self.suffix_var = StringVar(value="_15m.csv")
         self._path_row(left, "品种池", self.universe_var, self._choose_universe)
@@ -572,13 +733,13 @@ class QuantWorkbench:
         ).pack(fill="x", anchor="w", pady=(0, 2))
         self.quick_data_scan_button = ttk.Button(
             left,
-            text="扫描数据覆盖范围",
+            text="数据覆盖检查（不回测）",
             command=self._start_data_scan,
         )
         self.quick_data_scan_button.pack(fill="x", pady=(2, 4))
         ttk.Label(
             left,
-            text="可多选；“有数据”才可回测，实盘连续合约需映射到当前可交易合约",
+            text="这里只列出当前目录中确实有行情文件的品种。",
             wraplength=280,
             justify=LEFT,
         ).pack(anchor="w", pady=(7, 3))
@@ -606,15 +767,14 @@ class QuantWorkbench:
         list_actions.pack(fill="x", pady=(7, 0))
         ttk.Button(
             list_actions,
-            text="全选有数据",
+            text="全选列表",
             command=self._select_available_symbols,
         ).pack(side=LEFT, fill="x", expand=True)
-        ttk.Button(list_actions, text="全选当前", command=lambda: self.symbol_list.selection_set(0, END)).pack(side=LEFT, fill="x", expand=True)
         ttk.Button(list_actions, text="清除", command=lambda: self.symbol_list.selection_clear(0, END)).pack(side=LEFT, fill="x", expand=True, padx=3)
         ttk.Button(list_actions, text="刷新", command=self._load_universe).pack(side=LEFT, fill="x", expand=True)
         self.scan_button = ttk.Button(
             left,
-            text="一键扫描当前可用品种收益",
+            text="② 单品种扫描（独立排名）",
             command=self._start_scan_all,
         )
         self.scan_button.pack(fill="x", pady=(7, 0))
@@ -787,36 +947,27 @@ class QuantWorkbench:
             "divergence_valid_bars": "背离有效K线",
             "second_cross_window": "二次交叉窗口",
             "atr_stop_multiple": "ATR初始止损倍数",
-            "partial_exit_fraction": "部分退出比例（双均线=MA13）",
+            "partial_exit_fraction": "分批退出比例（MA13/强化版）",
             "position_equity_fraction": "单品种保证金预算比例",
         }
         self.fields = {key: StringVar(value=value) for key, value in defaults.items()}
         parameter_groups = {
-            "核心信号": [
-                "order_size", "fast_window", "slow_window", "atr_window",
-                "position_equity_fraction", "max_order_size",
+            "MA169 / MA13": [
+                "order_size", "max_order_size", "fast_window", "slow_window",
+                "atr_window", "ma_exit_buffer_atr", "partial_exit_fraction",
+                "position_equity_fraction", "max_notional_fraction",
             ],
-            "退出管理": [
-                "ma_exit_buffer_atr", "partial_exit_fraction",
-                "atr_stop_buffer", "reward_risk", "partial_exit_size",
-                "atr_stop_multiple",
-                "break_even_trigger_r", "trailing_atr_multiple",
-                "cooldown_bars", "loss_pause_after",
-                "loss_pause_bars",
+            "自适应信号": [
+                "order_size", "max_order_size", "entry_window", "exit_window",
+                "trend_window", "momentum_window", "volatility_window",
+                "target_annual_volatility", "max_notional_fraction",
+                "momentum_threshold", "annualization_factor",
             ],
-            "双周期参数": [
-                "daily_fast_window", "daily_slow_window",
-                "extreme_move_threshold", "extreme_lookback_days",
-                "setup_valid_days", "macd_fast", "macd_slow", "macd_signal",
-                "divergence_lookback", "divergence_pivot_radius",
-                "divergence_valid_bars", "second_cross_window",
-            ],
-            "自适应参数": [
-                "entry_window", "exit_window", "trend_window",
-                "momentum_window", "volatility_window",
-                "target_annual_volatility", "max_order_size",
-                "max_notional_fraction", "momentum_threshold",
-                "annualization_factor",
+            "强化退出风控": [
+                "atr_window", "atr_stop_multiple", "break_even_trigger_r",
+                "reward_risk", "partial_exit_fraction",
+                "trailing_atr_multiple", "cooldown_bars",
+                "loss_pause_after", "loss_pause_bars",
             ],
             "账户风控": [
                 "initial_cash", "max_margin_usage", "max_symbol_margin_usage",
@@ -824,11 +975,13 @@ class QuantWorkbench:
                 "max_group_positions", "daily_loss_stop", "slippage_ticks",
             ],
         }
-        parameter_tabs = ttk.Notebook(right)
-        parameter_tabs.pack(fill=BOTH, expand=True, pady=(7, 4))
+        self.parameter_tabs = ttk.Notebook(right)
+        self.parameter_tabs.pack(fill=BOTH, expand=True, pady=(7, 4))
+        self.parameter_tab_widgets: dict[str, ttk.Frame] = {}
         for title, keys in parameter_groups.items():
-            tab = ttk.Frame(parameter_tabs, padding=8)
-            parameter_tabs.add(tab, text=title)
+            tab = ttk.Frame(self.parameter_tabs, padding=8)
+            self.parameter_tabs.add(tab, text=title)
+            self.parameter_tab_widgets[title] = tab
             for index, key in enumerate(keys):
                 row, column = divmod(index, 2)
                 ttk.Label(tab, text=labels[key], width=20).grid(
@@ -846,9 +999,17 @@ class QuantWorkbench:
 
         actions = ttk.Frame(right)
         actions.pack(fill="x", pady=(10, 5))
-        self.run_button = ttk.Button(actions, text="运行共享账户回测", command=self._start_backtest)
+        self.run_button = ttk.Button(
+            actions,
+            text="① 回测所选品种（共享账户）",
+            command=self._start_backtest,
+        )
         self.run_button.pack(side=LEFT)
         ttk.Button(actions, text="打开最近报告目录", command=self._open_reports).pack(side=LEFT, padx=8)
+        ttk.Label(
+            actions,
+            text="③ 参数优化在“参数优化”页：大量重复回测，耗时较长。",
+        ).pack(side=LEFT, padx=8)
         self._update_period_note()
 
     def _build_data_api(self) -> None:
@@ -1000,7 +1161,7 @@ class QuantWorkbench:
         coverage_action.pack(fill="x")
         self.data_scan_button = ttk.Button(
             coverage_action,
-            text="扫描当前数据目录",
+            text="数据覆盖检查（不回测）",
             command=self._start_data_scan,
         )
         self.data_scan_button.pack(side=LEFT)
@@ -1063,7 +1224,7 @@ class QuantWorkbench:
     def _build_scanner(self) -> None:
         action = ttk.Frame(self.scan_tab)
         action.pack(fill="x")
-        self.scan_status = StringVar(value="尚未运行全品种扫描")
+        self.scan_status = StringVar(value="尚未运行批量单品种排名")
         ttk.Label(action, textvariable=self.scan_status, style="Metric.TLabel").pack(
             side=LEFT
         )
@@ -1112,10 +1273,18 @@ class QuantWorkbench:
         )
         action = ttk.Frame(self.optimization_tab)
         action.pack(fill="x")
-        self.optimize_button = ttk.Button(action, text="开始样本外参数优化", command=self._start_optimization)
+        self.optimize_button = ttk.Button(
+            action,
+            text="③ 参数优化（研究，耗时）",
+            command=self._start_optimization,
+        )
         self.optimize_button.pack(side=LEFT)
         self.optimization_status = StringVar(value="尚未运行优化")
         ttk.Label(action, textvariable=self.optimization_status).pack(side=LEFT, padx=10)
+        self.optimization_progress = ttk.Progressbar(
+            self.optimization_tab, mode="indeterminate"
+        )
+        self.optimization_progress.pack(fill="x", pady=(8, 2))
         self.optimization_tree = self._tree(self.optimization_tab)
 
     def _path_row(self, parent, label: str, variable: StringVar, command) -> None:
@@ -1255,26 +1424,33 @@ class QuantWorkbench:
     def _start_data_scan(self) -> None:
         data_dir = self._resolve(self.data_dir_var.get())
         suffix = self.suffix_var.get().strip()
-        self.data_scan_button.configure(state="disabled")
-        self.quick_data_scan_button.configure(state="disabled")
+        task = self._begin_background_task("data_scan", "数据覆盖检查")
+        if task is None:
+            return
         self.data_scan_status.set(
             f"正在扫描 {data_dir}；只读取时间与品种列，不会修改行情文件…"
         )
-        self.tabs.select(self.data_api_tab)
-        threading.Thread(
-            target=self._data_scan_job,
-            args=(data_dir, suffix),
-            daemon=True,
-        ).start()
+        self._launch_background_thread(
+            task,
+            "数据覆盖检查启动失败",
+            self._data_scan_job,
+            (data_dir, suffix, task),
+        )
 
-    def _data_scan_job(self, data_dir: Path, suffix: str) -> None:
+    def _data_scan_job(
+        self, data_dir: Path, suffix: str, task: BackgroundTask
+    ) -> None:
         try:
             coverage = scan_data_directory(data_dir, suffix)
-            self.root.after(
-                0, lambda: self._show_data_scan(coverage, data_dir)
+            self._post_task_success(
+                task,
+                "数据覆盖结果显示失败",
+                lambda coverage=coverage, data_dir=data_dir: self._show_data_scan(
+                    coverage, data_dir
+                ),
             )
         except Exception as exc:
-            self.root.after(0, lambda: self._data_scan_failed(exc))
+            self._post_task_error(task, "数据覆盖检查失败", exc)
 
     def _show_data_scan(self, coverage: pd.DataFrame, data_dir: Path) -> None:
         self._fill_tree(self.data_coverage_tree, coverage)
@@ -1291,14 +1467,11 @@ class QuantWorkbench:
                 f"{len(ok)}/{len(coverage)} 个文件可读；总体 {earliest} → {latest}；"
                 f"最短覆盖 {min_days} 天；约满三年 {three_year} 个；错误 {errors} 个。"
             )
-        self.data_scan_status.set(f"{summary} 目录：{data_dir}")
-        self.data_scan_button.configure(state="normal")
-        self.quick_data_scan_button.configure(state="normal")
+        self.data_scan_status.set(f"完成：{summary}")
+        self.status.set("数据覆盖检查完成；详情见“真实数据与API就绪”页。")
         self._update_data_source_badge()
 
     def _data_scan_failed(self, exc: Exception) -> None:
-        self.data_scan_button.configure(state="normal")
-        self.quick_data_scan_button.configure(state="normal")
         self.data_scan_status.set(f"扫描失败：{exc}")
         messagebox.showerror(
             "数据覆盖扫描失败",
@@ -1340,13 +1513,16 @@ class QuantWorkbench:
             f"输出文件已存在：\n{output}\n\n是否覆盖？原 .his 文件不会被修改。",
         ):
             return
-        self.pobo_import_button.configure(state="disabled")
+        task = self._begin_background_task("pobo_import", "博易行情导入")
+        if task is None:
+            return
         self.pobo_import_status.set("正在只读解析并聚合15分钟K线…")
-        threading.Thread(
-            target=self._pobo_import_job,
-            args=(source, output, symbol, name_table),
-            daemon=True,
-        ).start()
+        self._launch_background_thread(
+            task,
+            "博易行情导入启动失败",
+            self._pobo_import_job,
+            (source, output, symbol, name_table, task),
+        )
 
     def _pobo_import_job(
         self,
@@ -1354,6 +1530,7 @@ class QuantWorkbench:
         output: Path,
         symbol: str,
         name_table: Path | None,
+        task: BackgroundTask,
     ) -> None:
         try:
             result = import_pobo_his(
@@ -1388,15 +1565,17 @@ class QuantWorkbench:
                 ),
                 encoding="utf-8",
             )
-            self.root.after(
-                0,
-                lambda: self._pobo_import_finished(result, output),
+            self._post_task_success(
+                task,
+                "博易导入结果显示失败",
+                lambda result=result, output=output: self._pobo_import_finished(
+                    result, output
+                ),
             )
         except Exception as exc:
-            self.root.after(0, lambda: self._pobo_import_failed(exc))
+            self._post_task_error(task, "博易行情导入失败", exc)
 
     def _pobo_import_finished(self, result, output: Path) -> None:
-        self.pobo_import_button.configure(state="normal")
         self.pobo_import_status.set(
             f"完成：{result.source_bar_count} 根5分钟 → "
             f"{result.output_bar_count} 根15分钟；{output}"
@@ -1409,15 +1588,9 @@ class QuantWorkbench:
                 self.suffix_var.set(inferred_suffix)
         self._update_data_source_badge()
         self._filter_universe(select_defaults=True)
-        self._start_data_scan()
-        messagebox.showinfo(
-            "博易行情导入完成",
-            f"已生成标准CSV：\n{output}\n\n"
-            "下一步请查看覆盖范围。真实来源不代表已经满足三年可信回测要求。",
-        )
+        self.status.set("博易行情导入完成；下一步可运行“数据覆盖检查（不回测）”。")
 
     def _pobo_import_failed(self, exc: Exception) -> None:
-        self.pobo_import_button.configure(state="normal")
         self.pobo_import_status.set(f"导入失败：{exc}")
         messagebox.showerror(
             "博易行情导入失败",
@@ -1453,7 +1626,8 @@ class QuantWorkbench:
             self.status.set(f"品种池读取失败：{exc}")
             return
         self.universe_instruments = universe.instruments
-        groups = ["全部板块", *sorted({item.group for item in universe.instruments})]
+        available = self._current_available_instruments()
+        groups = ["全部板块", *sorted({item.group for item in available})]
         self.group_filter.configure(values=groups)
         if self.group_filter_var.get() not in groups:
             self.group_filter_var.set("全部板块")
@@ -1461,8 +1635,8 @@ class QuantWorkbench:
         self._refresh_available_data_controls()
         selected_count = len(self.symbol_list.curselection())
         self.status.set(
-            f"已载入 {len(universe.instruments)} 个品种；"
-            f"默认选中 {selected_count} 个已有行情品种"
+            f"已载入 {len(available)} 个有当前行情的品种；"
+            f"默认选中 {selected_count} 个"
         )
 
     def _current_available_instruments(self) -> list[Instrument]:
@@ -1476,56 +1650,52 @@ class QuantWorkbench:
         available_count = len(self._current_available_instruments())
         total_count = len(self.universe_instruments)
         if total_count:
+            hidden_count = max(0, total_count - available_count)
             self.available_data_status.set(
-                f"当前目录可回测：{available_count}/{total_count} 个品种；"
-                "一键扫描会自动跳过缺失行情。"
+                f"当前可回测 {available_count} 个；"
+                f"已隐藏 {hidden_count} 个无当前行情品种。"
             )
             self.scan_button.configure(
-                text=f"一键扫描当前可用 {available_count} 个品种收益"
+                text=f"② 批量单品种排名（{available_count} 个）",
+                state=(
+                    "disabled"
+                    if self.task_gate.current is not None or available_count == 0
+                    else "normal"
+                ),
             )
         else:
             self.available_data_status.set("当前目录可回测：品种池尚未载入")
-            self.scan_button.configure(text="一键扫描当前可用品种收益")
+            self.scan_button.configure(
+                text="② 批量单品种排名（无可用行情）",
+                state="disabled",
+            )
 
     def _filter_universe(self, select_defaults: bool = False) -> None:
         query = self.symbol_search_var.get().strip().lower()
         group = self.group_filter_var.get()
+        available = self._current_available_instruments()
         visible = [
             item
-            for item in self.universe_instruments
+            for item in available
             if (group == "全部板块" or item.group == group)
             and (not query or query in item.symbol.lower() or query in item.name.lower())
         ]
         self.visible_instruments = visible
-        available_symbols = {
-            item.symbol for item in self._current_available_instruments()
-        }
         self.symbol_list.delete(0, END)
         for instrument in visible:
-            availability = "有数据" if instrument.symbol in available_symbols else "缺数据"
             self.symbol_list.insert(
                 END,
-                f"{instrument.symbol}  {instrument.name}  [{instrument.group}]  {availability}",
+                f"{instrument.symbol}  {instrument.name}  [{instrument.group}]",
             )
         if select_defaults:
-            available_indices = [
-                index
-                for index, instrument in enumerate(visible)
-                if instrument.symbol in available_symbols
-            ]
-            for index in available_indices[:5]:
+            for index in range(min(5, len(visible))):
                 self.symbol_list.selection_set(index)
 
     def _select_available_symbols(self) -> None:
-        available_symbols = {
-            item.symbol for item in self._current_available_instruments()
-        }
         self.symbol_list.selection_clear(0, END)
-        selected = 0
-        for index, instrument in enumerate(self.visible_instruments):
-            if instrument.symbol in available_symbols:
-                self.symbol_list.selection_set(index)
-                selected += 1
+        selected = len(self.visible_instruments)
+        if selected:
+            self.symbol_list.selection_set(0, END)
         self.status.set(f"已选中当前筛选范围内 {selected} 个有本机行情的品种")
 
     def _selected_symbols(self) -> list[str]:
@@ -1533,6 +1703,7 @@ class QuantWorkbench:
 
     def _on_strategy_changed(self) -> None:
         name = STRATEGY_LABELS[self.strategy_var.get()]
+        self._refresh_parameter_tabs(name)
         if name == "dual_ma_pullback":
             self.strategy_warning.set(DUAL_MA_STRESS_WARNING)
         elif name == "adaptive_trend_v2":
@@ -1559,13 +1730,13 @@ class QuantWorkbench:
                 "atr_window": "14",
                 "ma_exit_buffer_atr": "0.1",
                 "partial_exit_fraction": "0.30",
-                "position_equity_fraction": "0.60",
+                "position_equity_fraction": "0.20",
                 "max_order_size": "5",
-                "max_notional_fraction": "10.0",
+                "max_notional_fraction": "2.0",
                 "max_margin_usage": "0.60",
-                "max_symbol_margin_usage": "0.60",
-                "max_symbol_exposure": "10.0",
-                "max_trade_risk": "0.03",
+                "max_symbol_margin_usage": "0.20",
+                "max_symbol_exposure": "2.0",
+                "max_trade_risk": "0.005",
             },
             "dual_period_reversal": {
                 "fast_window": "13",
@@ -1642,6 +1813,26 @@ class QuantWorkbench:
                 "1.0", json.dumps(grid, ensure_ascii=False, indent=2)
             )
 
+    def _refresh_parameter_tabs(self, strategy_name: str) -> None:
+        """Show only parameter groups that affect the selected UI strategy."""
+
+        if not hasattr(self, "parameter_tabs"):
+            return
+        visible_by_strategy = {
+            "dual_ma_pullback": ("MA169 / MA13", "账户风控"),
+            "adaptive_trend": ("自适应信号", "账户风控"),
+            "adaptive_trend_v2": (
+                "自适应信号",
+                "强化退出风控",
+                "账户风控",
+            ),
+        }
+        titles = visible_by_strategy.get(strategy_name, ("账户风控",))
+        for tab_id in self.parameter_tabs.tabs():
+            self.parameter_tabs.forget(tab_id)
+        for title in titles:
+            self.parameter_tabs.add(self.parameter_tab_widgets[title], text=title)
+
     def _set_runtime_interval(self, minutes: int) -> None:
         label = next(
             (label for label, value in INTERVAL_LABELS.items() if value == minutes),
@@ -1667,7 +1858,7 @@ class QuantWorkbench:
         if strategy_name == "dual_ma_pullback":
             self.period_note.set(
                 "本策略固定使用15分钟：MA169穿越入场，MA169±0.1ATR全退，"
-                "MA13反向穿越按剩余仓位比例分批退出；60%为高风险压力测试上限。"
+                "MA13反向穿越按剩余仓位比例分批退出；默认采用20%单品种安全候选参数。"
             )
         else:
             self.period_note.set(
@@ -1778,15 +1969,13 @@ class QuantWorkbench:
             )
         if strategy.name == "dual_ma_pullback":
             research_warnings.append(DUAL_MA_STRESS_WARNING)
-        if research_warnings and not messagebox.askyesno(
-            "确认仅运行研究回测",
-            "\n\n".join(research_warnings)
-            + "\n\n是否继续？本操作只回测，不连接API、不下单。",
-        ):
+        if not self._confirm_research_run("组合回测", research_warnings):
             return
-        self.run_button.configure(state="disabled")
+        task = self._begin_background_task("backtest", "组合回测")
+        if task is None:
+            return
         self.status.set(
-            f"正在读取数据并运行 {target_minutes} 分钟共享账户回测…"
+            f"正在进行：组合回测（{len(symbols)} 个品种，{target_minutes} 分钟）。"
         )
         run_values = {key: variable.get() for key, variable in self.fields.items()}
         symbol_groups = {
@@ -1794,9 +1983,11 @@ class QuantWorkbench:
             for item in self.universe_instruments
             if item.symbol in symbols
         }
-        threading.Thread(
-            target=self._backtest_job,
-            args=(
+        self._launch_background_thread(
+            task,
+            "组合回测启动失败",
+            self._backtest_job,
+            (
                 symbols,
                 source_minutes,
                 target_minutes,
@@ -1805,9 +1996,9 @@ class QuantWorkbench:
                 data_dir,
                 suffix,
                 symbol_groups,
+                task,
             ),
-            daemon=True,
-        ).start()
+        )
 
     def _backtest_job(
         self,
@@ -1819,6 +2010,7 @@ class QuantWorkbench:
         data_dir: Path,
         suffix: str,
         symbol_groups: dict[str, str],
+        task: BackgroundTask,
     ) -> None:
         try:
             specs = load_contract_specs(self.project_root / "configs/contracts.csv")
@@ -1881,6 +2073,8 @@ class QuantWorkbench:
                     "data_source_kind": data_classification.kind,
                     "data_source_label": data_classification.label,
                     "data_directory": str(data_dir),
+                    "strategy_name": config.name,
+                    "selected_symbols": ",".join(symbols),
                     "source_interval_minutes": source_minutes,
                     "bar_interval_minutes": target_minutes,
                     "source_bar_count": sum(map(len, source_bars.values())),
@@ -1923,9 +2117,13 @@ class QuantWorkbench:
             write_chinese_csv(result.rejections, output / "拒单记录.csv")
             write_chinese_csv(self._pnl_frame(result.trades), output / "历史盈亏.csv")
             write_chinese_csv(self._positions_frame(result.equity_curve), output / "可视化持仓.csv")
-            self.root.after(0, lambda: self._show_result(result, output))
+            self._post_task_success(
+                task,
+                "回测结果显示失败",
+                lambda result=result, output=output: self._show_result(result, output),
+            )
         except Exception as exc:
-            self.root.after(0, lambda: self._job_error("回测失败", exc))
+            self._post_task_error(task, "回测失败", exc)
 
     def _start_scan_all(self) -> None:
         universe_instruments = list(self.universe_instruments)
@@ -1956,7 +2154,7 @@ class QuantWorkbench:
                     "请点击“使用本机真实短样本（约8个月）”，或检查数据目录和文件后缀。"
                 )
         except Exception as exc:
-            messagebox.showerror("全品种扫描启动失败", str(exc))
+            messagebox.showerror("批量单品种排名启动失败", str(exc))
             return
         available_symbols = {instrument.symbol for instrument in instruments}
         skipped_symbols = [
@@ -1972,17 +2170,14 @@ class QuantWorkbench:
             )
         if strategy.name == "dual_ma_pullback":
             research_warnings.append(DUAL_MA_STRESS_WARNING)
-        if research_warnings and not messagebox.askyesno(
-            "确认仅运行研究扫描",
-            "\n\n".join(research_warnings)
-            + "\n\n是否继续？结果不会被标记为真实可信收益。",
-        ):
+        if not self._confirm_research_run("批量单品种排名", research_warnings):
             return
 
         run_values = {key: variable.get() for key, variable in self.fields.items()}
         self.scan_cancel_event.clear()
-        self.scan_button.configure(state="disabled")
-        self.scan_cancel_button.configure(state="normal")
+        task = self._begin_background_task("scan", "批量单品种排名")
+        if task is None:
+            return
         self.scan_progress.configure(value=0, maximum=len(instruments))
         skipped_note = (
             f" · 已跳过 {len(skipped_symbols)} 个缺失行情品种"
@@ -1994,12 +2189,13 @@ class QuantWorkbench:
             f"{classification.label}{skipped_note}"
         )
         self.status.set(
-            f"正在运行 {len(instruments)} 个可用行情品种的独立收益扫描…{skipped_note}"
+            f"正在进行：批量单品种排名（{len(instruments)} 个品种）。{skipped_note}"
         )
-        self.tabs.select(self.scan_tab)
-        threading.Thread(
-            target=self._scan_all_job,
-            args=(
+        self._launch_background_thread(
+            task,
+            "批量单品种排名启动失败",
+            self._scan_all_job,
+            (
                 instruments,
                 source_minutes,
                 target_minutes,
@@ -2008,9 +2204,9 @@ class QuantWorkbench:
                 data_dir,
                 suffix,
                 skipped_symbols,
+                task,
             ),
-            daemon=True,
-        ).start()
+        )
 
     def _scan_all_job(
         self,
@@ -2022,6 +2218,7 @@ class QuantWorkbench:
         data_dir: Path,
         suffix: str,
         skipped_symbols: list[str],
+        task: BackgroundTask,
     ) -> None:
         try:
             specs = load_contract_specs(self.project_root / "configs/contracts.csv")
@@ -2040,8 +2237,8 @@ class QuantWorkbench:
             def progress(index: int, total: int, symbol: str) -> None:
                 self.root.after(
                     0,
-                    lambda i=index, t=total, s=symbol: self._update_scan_progress(
-                        i, t, s
+                    lambda task=task, i=index, t=total, s=symbol: self._update_scan_progress(
+                        task, i, t, s
                     ),
                 )
 
@@ -2061,12 +2258,12 @@ class QuantWorkbench:
                 cancelled=self.scan_cancel_event.is_set,
             )
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output = self.project_root / "reports" / "full_universe_scan" / stamp
+            output = self.project_root / "reports" / "single_symbol_ranking" / stamp
             output.mkdir(parents=True, exist_ok=True)
             ranking.to_csv(
                 output / "scan_results.csv", index=False, encoding="utf-8-sig"
             )
-            write_chinese_csv(ranking, output / "全品种收益排名.csv")
+            write_chinese_csv(ranking, output / "批量单品种排名.csv")
             scan_config = {
                 "data": {
                     "directory": str(data_dir),
@@ -2078,6 +2275,7 @@ class QuantWorkbench:
                 "bar_interval_minutes": target_minutes,
                 "universe_instrument_count": len(instruments) + len(skipped_symbols),
                 "available_instrument_count": len(instruments),
+                "scanned_symbols": [item.symbol for item in instruments],
                 "skipped_missing_data_symbols": skipped_symbols,
                 "strategy": strategy.__dict__,
                 "risk": run_values,
@@ -2087,20 +2285,25 @@ class QuantWorkbench:
                 encoding="utf-8",
             )
             was_cancelled = self.scan_cancel_event.is_set()
-            self.root.after(
-                0,
-                lambda: self._show_scan_results(
+            self._post_task_success(
+                task,
+                "扫描结果显示失败",
+                lambda ranking=ranking, output=output, was_cancelled=was_cancelled, data_label=classify_data_source(data_dir).label, skipped_count=len(skipped_symbols): self._show_scan_results(
                     ranking,
                     output,
                     was_cancelled,
-                    classify_data_source(data_dir).label,
-                    len(skipped_symbols),
+                    data_label,
+                    skipped_count,
                 ),
             )
         except Exception as exc:
-            self.root.after(0, lambda: self._scan_failed(exc))
+            self._post_task_error(task, "批量单品种排名失败", exc)
 
-    def _update_scan_progress(self, index: int, total: int, symbol: str) -> None:
+    def _update_scan_progress(
+        self, task: BackgroundTask, index: int, total: int, symbol: str
+    ) -> None:
+        if not self.task_gate.is_current(task):
+            return
         self.scan_progress.configure(value=index, maximum=total)
         self.scan_status.set(f"扫描中 {index}/{total} · 当前 {symbol}")
 
@@ -2158,28 +2361,23 @@ class QuantWorkbench:
         )
         self.scan_status.set(
             f"{prefix} · {data_label} · 成功 {successful} · 失败 {failed}"
-            f"{skipped_note} · 结果：{output}"
+            f"{skipped_note} · 结果已保存"
         )
         self.scan_progress.configure(value=len(ranking))
-        self.scan_button.configure(state="normal")
-        self.scan_cancel_button.configure(state="disabled")
-        self.status.set(f"全品种扫描结果：{output}")
-        self.tabs.select(self.scan_tab)
+        self.status.set("批量单品种排名完成；结果见对应页面。")
 
     def _scan_failed(self, exc: Exception) -> None:
-        self.scan_button.configure(state="normal")
-        self.scan_cancel_button.configure(state="disabled")
         self.scan_status.set(f"扫描失败：{exc}")
-        self.status.set(str(exc))
+        self.status.set("批量单品种排名失败；请查看提示并调整后重试。")
         messagebox.showerror(
-            "全品种扫描失败",
+            "批量单品种排名失败",
             f"{exc}\n\n已完成的品种不会被当作完整全市场结果。"
             "请先在“真实数据与API就绪”页检查目录、后缀和覆盖范围。",
         )
 
     def _select_scan_top_five(self) -> None:
         if self.scan_results.empty:
-            messagebox.showinfo("没有扫描结果", "请先运行全品种扫描。")
+            messagebox.showinfo("没有排名结果", "请先运行批量单品种排名。")
             return
         symbols = self.scan_results.loc[
             self.scan_results["status"].eq("ok"), "symbol"
@@ -2199,8 +2397,10 @@ class QuantWorkbench:
         self.result = result
         summary = result.summary
         data_label = str(summary.get("data_source_label", "来源未记录"))
+        strategy_name = str(summary.get("strategy_name", "未记录策略"))
+        selected_symbols = str(summary.get("selected_symbols", "未记录品种"))
         self.summary_heading.set(
-            f"{data_label}｜完整回测摘要    结果目录：{output}"
+            f"{data_label}｜{strategy_name}｜品种：{selected_symbols}"
         )
         self.summary_tree.delete(*self.summary_tree.get_children())
         for key, value in summary.items():
@@ -2218,9 +2418,7 @@ class QuantWorkbench:
         positions = self._positions_frame(result.equity_curve)
         self._fill_tree(self.positions_tree, positions)
         self._draw_curve()
-        self.run_button.configure(state="normal")
-        self.status.set(f"回测完成：{output}")
-        self.tabs.select(self.summary_tab)
+        self.status.set("组合回测完成；结果见“回测摘要”和各结果页。")
 
     @staticmethod
     def _format_summary_value(key: str, value: object) -> str:
@@ -2343,7 +2541,7 @@ class QuantWorkbench:
                     preview += f"\n…另有 {remainder} 个文件缺失"
                 raise FileNotFoundError(
                     f"所选优化品种缺少行情文件：\n{preview}\n"
-                    "请点击“全选有数据”，或调整数据目录和文件后缀。"
+                    "请点击“全选列表”，或调整数据目录和文件后缀。"
                 )
             grid = json.loads(self.grid_text.get("1.0", END))
             if not isinstance(grid, dict) or not grid:
@@ -2360,12 +2558,17 @@ class QuantWorkbench:
         except Exception as exc:
             messagebox.showerror("参数网格错误", str(exc))
             return
-        self.optimize_button.configure(state="disabled")
-        self.optimization_status.set("优化运行中；候选较多时需要较长时间…")
+        task = self._begin_background_task("optimization", "参数优化")
+        if task is None:
+            return
+        self.optimization_status.set("优化进行中；这是研究任务，候选较多时需要较长时间…")
+        self.optimization_progress.start(12)
         run_values = {key: variable.get() for key, variable in self.fields.items()}
-        threading.Thread(
-            target=self._optimization_job,
-            args=(
+        self._launch_background_thread(
+            task,
+            "参数优化启动失败",
+            self._optimization_job,
+            (
                 symbols,
                 grid,
                 strategy_config,
@@ -2375,9 +2578,9 @@ class QuantWorkbench:
                 self._resolve(self.universe_var.get()),
                 data_dir,
                 suffix,
+                task,
             ),
-            daemon=True,
-        ).start()
+        )
 
     def _optimization_job(
         self,
@@ -2390,6 +2593,7 @@ class QuantWorkbench:
         source_universe_path: Path,
         data_dir: Path,
         suffix: str,
+        task: BackgroundTask,
     ) -> None:
         try:
             output = self.project_root / "reports" / "workbench_optimization"
@@ -2534,19 +2738,25 @@ class QuantWorkbench:
                 if path.suffix.lower() == ".csv" and path.exists():
                     write_chinese_companion(pd.read_csv(path), path)
             ranking = pd.read_csv(paths["candidate_ranking"])
-            self.root.after(0, lambda: self._show_optimization(ranking, paths))
+            self._post_task_success(
+                task,
+                "优化结果显示失败",
+                lambda ranking=ranking, paths=paths: self._show_optimization(
+                    ranking, paths
+                ),
+            )
         except Exception as exc:
-            self.root.after(0, lambda: self._job_error("参数优化失败", exc, optimization=True))
+            self._post_task_error(task, "参数优化失败", exc)
 
     def _show_optimization(self, ranking: pd.DataFrame, paths: dict[str, Path]) -> None:
+        self.optimization_progress.stop()
         columns = [
             column
             for column in ["rank", "selection_score", "train_score", "validation_score", "parameters", "status", "error"]
             if column in ranking.columns
         ]
         self._fill_tree(self.optimization_tree, ranking[columns].head(200))
-        self.optimize_button.configure(state="normal")
-        self.optimization_status.set(f"优化完成；最优参数与样本外报告：{paths['optimization_report']}")
+        self.optimization_status.set("优化完成；最优参数与样本外报告已保存。")
         if "strategy_comparison" in paths:
             comparison = pd.read_csv(paths["strategy_comparison"])
             for column in [
@@ -2573,15 +2783,14 @@ class QuantWorkbench:
             )
 
     def _job_error(self, title: str, exc: Exception, optimization: bool = False) -> None:
-        self.run_button.configure(state="normal")
-        self.optimize_button.configure(state="normal")
         guidance = (
             "请检查数据目录/文件后缀/所选品种、合约参数和K线周期。"
             "本次任务已停止，没有连接API，也没有产生真实委托。"
         )
         if optimization:
+            self.optimization_progress.stop()
             self.optimization_status.set(f"{title}：{exc}")
-        self.status.set(f"{title}：{exc}")
+        self.status.set(f"{title}；请查看提示后重试。")
         messagebox.showerror(title, f"{exc}\n\n{guidance}")
 
     def _open_reports(self) -> None:

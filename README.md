@@ -1,6 +1,6 @@
 # 国内期货量化项目
 
-> 工作台默认策略为「自适应趋势」安全基准。15分钟 MA169 穿越/MA13 分批策略仍保留，但 60% 单品种保证金预算和 3% 单笔风险只用于压力测试；系统现在强制单笔最多 5 手。更稳健的双均线候选配置见 `configs/backtest_ma_pullback_safe.json`。双击 `启动量化工作台.bat` 或运行 `python -m futures_quant dashboard`。
+> 工作台默认策略为「自适应趋势」安全基准，只显示三项常用策略。15分钟 MA169 穿越/MA13 分批在工作台使用20%单品种保证金、0.5%单笔风险和最多5手的安全候选参数；60%/3%版本只保留为独立压力测试。双击 `启动量化工作台.bat` 或运行 `python -m futures_quant dashboard`。
 
 > 中文显示：工作台的持仓、历史成交、历史盈亏和参数优化表格统一使用中文表头；工作台生成的用户文件使用中文文件名和中文表头。命令行流程在保留英文内部文件供程序读取的同时，会自动生成文件名带 `_中文` 的中文表头副本。
 
@@ -26,6 +26,8 @@
 - 统一交易软件 API 边界：`TradingGateway`
 - 本地模拟网关：`MockGateway`
 - CTP 无密码网关框架：状态机、回调归一化、重连、下单前风控与实盘二次解锁；未配置 SDK/凭据时默认禁用
+- OKX 子账户 REST：环境变量密钥、签名、UID/主UID核验、余额/持仓/委托/成交查询、Demo 标头、限价减仓与撤单安全门
+- OKX 公共 15 分钟历史下载：分页、去重、排除未收盘K线并保存独立来源清单
 - 配置校验：启动回测前检查保证金、手续费、合约乘数、策略窗口等关键参数
 - 合约参数表：`configs/contracts.csv`
 - 行情落盘工具：把交易网关输出的标准 Bar 写成 CSV，供回测复用
@@ -53,9 +55,9 @@ $python = if ($env:FQ_PYTHON) { $env:FQ_PYTHON } else { "python" }
 ### 在工作台测试本机真实约 8 个月样本
 
 1. 双击 `启动量化工作台.bat`，在“回测与策略”页点击“使用本机真实短样本（约8个月）”。
-2. 工作台会设为 `data/pobo_real_15m`、`_15m.csv` 和 15 分钟，并显示“当前目录可回测 22/69 个品种”。默认勾选前 5 个可用品种。
-3. 单品种或组合回测前，点击“全选有数据”只选择当前目录中实际存在的行情；品种列表会标记“有数据/缺数据”。
-4. “一键扫描当前可用 22 个品种收益”只扫描本机已有文件，自动跳过其余 47 个未导入品种，并把跳过清单写入扫描配置。
+2. 工作台会设为 `data/pobo_real_15m`、`_15m.csv` 和 15 分钟，并显示“当前可回测 22 个；已隐藏缺行情 47 个”。默认勾选前 5 个可用品种。
+3. 品种列表只显示当前目录中实际存在真实行情文件的品种；切换目录或重新导入后点击“刷新”即可更新列表。
+4. “② 批量单品种排名”只测试列表中有真实行情的品种，并把本次实际测试清单写入扫描配置。
 
 这是终端缓存导入的真实短样本，适合验证信号、成本、风控和工作台流程；它不是三年样本，主力连续合约换月也尚未审计完成，不能据此作为实盘盈利结论。
 
@@ -69,6 +71,29 @@ python -m futures_quant ctp-diagnose --config configs\api.changjiang.example.jso
 ```
 
 后续 SDK 适配和实盘安全门说明见 `docs/CTP_GATEWAY_DEVELOPMENT.md`。在获得期货公司仿真 SDK、程序化交易权限和账户本人单独授权之前，项目保持 `enabled=false` 且工作台不提供登录或下单入口。
+
+## OKX 子账户（默认关闭）
+
+OKX 与国内期货完全分开。配置模板为 `configs/api.okx.example.json`，密钥只能从 `OKX_API_KEY`、`OKX_SECRET_KEY`、`OKX_PASSPHRASE` 环境变量读取；不要把值写入 JSON、Git 或聊天。
+
+离线检查配置（不读取密钥、不联网）：
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m futures_quant okx-diagnose --config configs\api.okx.example.json
+```
+
+先复制模板为 Git 已忽略的 `configs/api.okx.local.json`，只开启 `enabled` 和 `private_api_enabled`，并确认 `environment` 是 `demo` 还是 `live`。随后双击 `启动OKX只读诊断.bat`，在本机窗口中隐蔽输入三项 API 凭据。脚本只查询服务器时间、子账户 UID、余额/持仓/未完成订单条目数，结束或报错时都会清除进程内凭据；不会下单。不要把密钥发到聊天中。
+
+下面是同一只读诊断的高级命令行入口；只有显式加 `--connect-read-only` 才会联网：
+
+```powershell
+python -m futures_quant okx-diagnose `
+  --config configs\api.okx.local.json `
+  --connect-read-only
+```
+
+完整分阶段说明见 `docs/OKX_SUBACCOUNT_SETUP.md`。
 
 ## 快速运行
 
